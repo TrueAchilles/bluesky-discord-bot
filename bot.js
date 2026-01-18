@@ -9,6 +9,8 @@ const config = {
     adminRoleId: process.env.ADMIN_ROLE_ID || null
   },
   bluesky: {
+    handle: process.env.BLUESKY_BOT_HANDLE || '', // Your Bluesky handle for authentication
+    password: process.env.BLUESKY_BOT_PASSWORD || '', // Your Bluesky app password
     handles: process.env.BLUESKY_HANDLES ? 
       process.env.BLUESKY_HANDLES.split(',').map(h => h.trim()) : 
       ['user.bsky.social'],
@@ -39,6 +41,28 @@ const agent = new BskyAgent({
 
 // Track the last seen post for each account
 const lastSeenPosts = new Map();
+
+// Login to Bluesky
+async function loginToBluesky() {
+  if (!config.bluesky.handle || !config.bluesky.password) {
+    console.error('⚠️  Warning: BLUESKY_BOT_HANDLE and BLUESKY_BOT_PASSWORD not set.');
+    console.error('⚠️  The bot may not be able to fetch posts. Please add these credentials.');
+    return false;
+  }
+
+  try {
+    await agent.login({
+      identifier: config.bluesky.handle,
+      password: config.bluesky.password
+    });
+    console.log(`✅ Logged into Bluesky as @${config.bluesky.handle}`);
+    return true;
+  } catch (error) {
+    console.error('❌ Failed to login to Bluesky:', error.message);
+    console.error('Please check your BLUESKY_BOT_HANDLE and BLUESKY_BOT_PASSWORD');
+    return false;
+  }
+}
 
 // Check if user has permission to use bot commands
 function hasPermission(member) {
@@ -399,8 +423,18 @@ async function checkAllAccounts() {
 }
 
 // Discord bot ready event
-discord.once('ready', () => {
+discord.once('ready', async () => {
   console.log(`Discord bot logged in as ${discord.user.tag}`);
+  
+  // Login to Bluesky first
+  const loggedIn = await loginToBluesky();
+  
+  if (!loggedIn) {
+    console.error('⚠️  Bot started but cannot fetch Bluesky posts without authentication.');
+    console.error('⚠️  Please set BLUESKY_BOT_HANDLE and BLUESKY_BOT_PASSWORD environment variables.');
+    return;
+  }
+  
   console.log(`Monitoring ${config.bluesky.handles.length} Bluesky account(s):`);
   config.bluesky.handles.forEach(h => console.log(`  - @${h}`));
   
