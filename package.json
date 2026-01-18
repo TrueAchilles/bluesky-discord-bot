@@ -14,14 +14,3 @@
     "@atproto/api": "^0.12.0"
   }
 }
-```
-
-**2. Create `bot.js`:**
-
-Copy the entire bot code from the artifact into this file.
-
-**3. Create `.gitignore`:**
-```
-node_modules/
-.env
-.DS_Store
