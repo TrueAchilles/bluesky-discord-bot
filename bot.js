@@ -6,7 +6,9 @@ const config = {
   discord: {
     token: process.env.DISCORD_TOKEN || 'YOUR_DISCORD_BOT_TOKEN',
     channelId: process.env.DISCORD_CHANNEL_ID || 'YOUR_CHANNEL_ID',
-    adminRoleId: process.env.ADMIN_ROLE_ID || null
+    adminRoleIds: process.env.ADMIN_ROLE_IDS ? 
+      process.env.ADMIN_ROLE_IDS.split(',').map(id => id.trim()) : 
+      []
   },
   bluesky: {
     handle: process.env.BLUESKY_BOT_HANDLE || '', // Your Bluesky handle for authentication
@@ -225,6 +227,75 @@ async function handleCommand(message) {
         }
         break;
 
+      case 'roles':
+        // Manage authorized roles: !bsky roles add/remove/list
+        if (args.length < 2) {
+          await message.reply('Usage: `!bsky roles <add|remove|list> [role ID or @mention]`\nExample: `!bsky roles add @Moderator`');
+          return;
+        }
+        
+        // Only server admins can modify role permissions
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
+          await message.reply('❌ Only server administrators can modify role permissions.');
+          return;
+        }
+        
+        const roleAction = args[1].toLowerCase();
+        
+        if (roleAction === 'list') {
+          if (config.discord.adminRoleIds.length === 0) {
+            await message.reply('📋 **Authorized Roles:** None configured\n\nUsers with "Manage Server" permission can use bot commands.');
+            return;
+          }
+          const roleList = config.discord.adminRoleIds.map(id => {
+            const role = message.guild.roles.cache.get(id);
+            return role ? `• ${role.name} (${id})` : `• Unknown Role (${id})`;
+          }).join('\n');
+          await message.reply(`📋 **Authorized Roles:**\n${roleList}\n\nUsers with these roles can use bot commands.`);
+        } else if (roleAction === 'add') {
+          if (args.length < 3) {
+            await message.reply('Usage: `!bsky roles add <role ID or @mention>`\nExample: `!bsky roles add @Moderator`');
+            return;
+          }
+          
+          // Extract role ID from mention or direct ID
+          let roleId = args[2].replace(/[<@&>]/g, '');
+          const role = message.guild.roles.cache.get(roleId);
+          
+          if (!role) {
+            await message.reply('❌ Could not find that role. Use a role mention (@Role) or role ID.');
+            return;
+          }
+          
+          if (config.discord.adminRoleIds.includes(roleId)) {
+            await message.reply(`❌ Role ${role.name} is already authorized.`);
+            return;
+          }
+          
+          config.discord.adminRoleIds.push(roleId);
+          await message.reply(`✅ Added ${role.name} to authorized roles.\nMembers with this role can now use bot commands.`);
+        } else if (roleAction === 'remove') {
+          if (args.length < 3) {
+            await message.reply('Usage: `!bsky roles remove <role ID or @mention>`');
+            return;
+          }
+          
+          let roleId = args[2].replace(/[<@&>]/g, '');
+          const idx = config.discord.adminRoleIds.indexOf(roleId);
+          
+          if (idx === -1) {
+            await message.reply('❌ That role is not in the authorized list.');
+            return;
+          }
+          
+          const role = message.guild.roles.cache.get(roleId);
+          config.discord.adminRoleIds.splice(idx, 1);
+          await message.reply(`✅ Removed ${role ? role.name : 'role'} from authorized roles.`);
+        } else {
+          await message.reply('Usage: `!bsky roles <add|remove|list>`');
+        }
+        break;
+
       case 'status':
         // Show complete bot status: !bsky status
         const statusEmbed = new EmbedBuilder()
@@ -254,6 +325,16 @@ async function handleCommand(message) {
                 ? config.filter.keywords.join(', ')
                 : 'None',
               inline: false
+            },
+            {
+              name: '👥 Authorized Roles',
+              value: config.discord.adminRoleIds.length > 0
+                ? config.discord.adminRoleIds.map(id => {
+                    const role = message.guild.roles.cache.get(id);
+                    return role ? role.name : 'Unknown';
+                  }).join(', ')
+                : 'Manage Server permission required',
+              inline: false
             }
           )
           .setFooter({ text: `Checking every ${config.bluesky.checkInterval / 1000} seconds` });
@@ -277,6 +358,10 @@ async function handleCommand(message) {
             { name: '!bsky clear', value: 'Clear all keywords' },
             { name: '!bsky mode <type>', value: '`include` = only post matching\n`exclude` = skip matching\n`none` = post all' },
             { name: '!bsky case <on|off>', value: 'Toggle case-sensitive filtering' },
+            { name: '**Permission Commands**', value: '\u200b', inline: false },
+            { name: '!bsky roles add @Role', value: 'Authorize a role to use bot commands (Admin only)' },
+            { name: '!bsky roles remove @Role', value: 'Remove role authorization (Admin only)' },
+            { name: '!bsky roles list', value: 'List authorized roles' },
             { name: '**Other Commands**', value: '\u200b', inline: false },
             { name: '!bsky status', value: 'Show complete bot status' },
             { name: '!bsky help', value: 'Show this help message' }
