@@ -1,6 +1,10 @@
 const { Client, GatewayIntentBits, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 const { BskyAgent } = require('@atproto/api');
+const express = require('express');
+const app = express();
 
+app.get('/healthz', (req, res) => res.send('OK'));
+app.listen(3000, () => console.log('Keep-alive server running'));
 // Configuration - uses environment variables for security
 const config = {
   discord: {
