@@ -1,10 +1,34 @@
 const { Client, GatewayIntentBits, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 const { BskyAgent } = require('@atproto/api');
-const express = require('express');
-const app = express();
+const fs = require('fs').promises;
+const path = require('path');
+const http = require('http');
 
-app.get('/healthz', (req, res) => res.send('OK'));
-app.listen(3000, () => console.log('Keep-alive server running'));
+// Path to settings file
+const SETTINGS_FILE = path.join(__dirname, 'bot-settings.json');
+
+// Health check server for platforms like Render
+const PORT = process.env.PORT || 3000;
+const server = http.createServer((req, res) => {
+  if (req.url === '/health' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: 'ok',
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
+      discord: discord.isReady() ? 'connected' : 'disconnected',
+      accountsMonitored: config.bluesky.handles.length
+    }));
+  } else {
+    res.writeHead(404);
+    res.end('Not Found');
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`🏥 Health check server running on port ${PORT}`);
+});
+
 // Configuration - uses environment variables for security
 const config = {
   discord: {
@@ -47,6 +71,58 @@ const agent = new BskyAgent({
 
 // Track the last seen post for each account
 const lastSeenPosts = new Map();
+
+// Load settings from file
+async function loadSettings() {
+  try {
+    const data = await fs.readFile(SETTINGS_FILE, 'utf8');
+    const saved = JSON.parse(data);
+    
+    // Restore saved settings
+    if (saved.handles) config.bluesky.handles = saved.handles;
+    if (saved.keywords) config.filter.keywords = saved.keywords;
+    if (saved.mode) config.filter.mode = saved.mode;
+    if (saved.caseSensitive !== undefined) config.filter.caseSensitive = saved.caseSensitive;
+    if (saved.adminRoleIds) config.discord.adminRoleIds = saved.adminRoleIds;
+    if (saved.lastSeenPosts) {
+      Object.entries(saved.lastSeenPosts).forEach(([handle, uri]) => {
+        lastSeenPosts.set(handle, uri);
+      });
+    }
+    
+    console.log('✅ Loaded settings from file');
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      console.log('📝 No saved settings found, using defaults');
+    } else {
+      console.error('⚠️  Error loading settings:', error.message);
+    }
+    return false;
+  }
+}
+
+// Save settings to file
+async function saveSettings() {
+  try {
+    const settings = {
+      handles: config.bluesky.handles,
+      keywords: config.filter.keywords,
+      mode: config.filter.mode,
+      caseSensitive: config.filter.caseSensitive,
+      adminRoleIds: config.discord.adminRoleIds,
+      lastSeenPosts: Object.fromEntries(lastSeenPosts),
+      lastUpdated: new Date().toISOString()
+    };
+    
+    await fs.writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf8');
+    console.log('💾 Settings saved');
+    return true;
+  } catch (error) {
+    console.error('⚠️  Error saving settings:', error.message);
+    return false;
+  }
+}
 
 // Login to Bluesky
 async function loginToBluesky() {
@@ -144,6 +220,7 @@ async function handleCommand(message) {
         }
         config.bluesky.handles.splice(index, 1);
         lastSeenPosts.delete(handleToUnfollow);
+        await saveSettings();
         await message.reply(`✅ Unfollowed @${handleToUnfollow}\nTotal accounts: ${config.bluesky.handles.length}`);
         break;
 
@@ -169,6 +246,7 @@ async function handleCommand(message) {
             config.filter.keywords.push(kw);
           }
         });
+        await saveSettings();
         await message.reply(`✅ Added keywords: ${newKeywords.join(', ')}\nCurrent keywords: ${config.filter.keywords.join(', ')}`);
         break;
 
@@ -184,6 +262,7 @@ async function handleCommand(message) {
             config.filter.keywords.splice(idx, 1);
           }
         });
+        await saveSettings();
         await message.reply(`✅ Removed keywords: ${toRemove.join(', ')}\nCurrent keywords: ${config.filter.keywords.join(', ') || 'None'}`);
         break;
 
@@ -197,6 +276,7 @@ async function handleCommand(message) {
 
       case 'clear':
         config.filter.keywords = [];
+        await saveSettings();
         await message.reply('✅ All keywords cleared.');
         break;
 
@@ -211,6 +291,7 @@ async function handleCommand(message) {
           return;
         }
         config.filter.mode = mode;
+        await saveSettings();
         await message.reply(`✅ Filter mode set to: **${mode}**`);
         break;
 
@@ -222,9 +303,11 @@ async function handleCommand(message) {
         const caseSetting = args[1].toLowerCase();
         if (caseSetting === 'on') {
           config.filter.caseSensitive = true;
+          await saveSettings();
           await message.reply('✅ Case-sensitive filtering enabled.');
         } else if (caseSetting === 'off') {
           config.filter.caseSensitive = false;
+          await saveSettings();
           await message.reply('✅ Case-insensitive filtering enabled.');
         } else {
           await message.reply('❌ Use `on` or `off`');
@@ -277,6 +360,7 @@ async function handleCommand(message) {
           }
           
           config.discord.adminRoleIds.push(roleId);
+          await saveSettings();
           await message.reply(`✅ Added ${role.name} to authorized roles.\nMembers with this role can now use bot commands.`);
         } else if (roleAction === 'remove') {
           if (args.length < 3) {
@@ -294,6 +378,7 @@ async function handleCommand(message) {
           
           const role = message.guild.roles.cache.get(roleId);
           config.discord.adminRoleIds.splice(idx, 1);
+          await saveSettings();
           await message.reply(`✅ Removed ${role ? role.name : 'role'} from authorized roles.`);
         } else {
           await message.reply('Usage: `!bsky roles <add|remove|list>`');
@@ -515,7 +600,10 @@ async function checkAllAccounts() {
 discord.once('ready', async () => {
   console.log(`Discord bot logged in as ${discord.user.tag}`);
   
-  // Login to Bluesky first
+  // Load saved settings first
+  await loadSettings();
+  
+  // Login to Bluesky
   const loggedIn = await loginToBluesky();
   
   if (!loggedIn) {
@@ -527,9 +615,11 @@ discord.once('ready', async () => {
   console.log(`Monitoring ${config.bluesky.handles.length} Bluesky account(s):`);
   config.bluesky.handles.forEach(h => console.log(`  - @${h}`));
   
-  // Initialize tracking for all accounts
+  // Initialize tracking for all accounts (don't override loaded values)
   config.bluesky.handles.forEach(handle => {
-    lastSeenPosts.set(handle, null);
+    if (!lastSeenPosts.has(handle)) {
+      lastSeenPosts.set(handle, null);
+    }
   });
   
   // Start checking for new posts
