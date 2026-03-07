@@ -6,9 +6,7 @@
   "scripts": {
     "start": "node bot.js"
   },
-  "engines": {
-    "node": "18.x"
-  },
+  "engines": { "node": "24.x" },
   "dependencies": {
     "discord.js": "^14.14.1",
     "@atproto/api": "^0.12.0"
