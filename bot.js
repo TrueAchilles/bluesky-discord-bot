@@ -9,6 +9,8 @@ const SETTINGS_FILE = path.join(__dirname, 'bot-settings.json');
 
 // Health check server for platforms like Render
 const PORT = process.env.PORT || 3000;
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL; // Render sets this automatically
+
 const server = http.createServer((req, res) => {
   if (req.url === '/health' || req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -27,6 +29,20 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.log(`🏥 Health check server running on port ${PORT}`);
+  
+  // Self-ping every 14 minutes to prevent Render from sleeping
+  // (Render free tier sleeps after 15 minutes of inactivity)
+  if (RENDER_URL) {
+    console.log(`🔄 Self-ping enabled - pinging ${RENDER_URL}/health every 14 minutes`);
+    setInterval(() => {
+      const url = `${RENDER_URL}/health`;
+      http.get(url, (res) => {
+        console.log(`✅ Self-ping successful (status: ${res.statusCode})`);
+      }).on('error', (err) => {
+        console.error('⚠️  Self-ping failed:', err.message);
+      });
+    }, 14 * 60 * 1000); // 14 minutes
+  }
 });
 
 // Configuration - uses environment variables for security
