@@ -3,6 +3,7 @@ const { BskyAgent } = require('@atproto/api');
 const fs = require('fs').promises;
 const path = require('path');
 const http = require('http');
+const https = require('https');
 
 // Path to settings file
 const SETTINGS_FILE = path.join(__dirname, 'bot-settings.json');
@@ -36,7 +37,10 @@ server.listen(PORT, () => {
     console.log(`🔄 Self-ping enabled - pinging ${RENDER_URL}/health every 14 minutes`);
     setInterval(() => {
       const url = `${RENDER_URL}/health`;
-      http.get(url, (res) => {
+      // Use https module for HTTPS URLs, http module for HTTP URLs
+      const client = url.startsWith('https://') ? https : http;
+      
+      client.get(url, (res) => {
         console.log(`✅ Self-ping successful (status: ${res.statusCode})`);
       }).on('error', (err) => {
         console.error('⚠️  Self-ping failed:', err.message);
