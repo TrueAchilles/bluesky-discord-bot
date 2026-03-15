@@ -92,6 +92,10 @@ const agent = new BskyAgent({
 // Track the last seen post for each account
 const lastSeenPosts = new Map();
 
+// Track recent posts cache per account (prevents duplicates)
+const recentPostsCache = new Map(); // Map<handle, Set<postUri>>
+const CACHE_SIZE = 10; // Keep last 10 posts per account
+
 // Load settings from file
 async function loadSettings() {
   try {
@@ -107,6 +111,11 @@ async function loadSettings() {
     if (saved.lastSeenPosts) {
       Object.entries(saved.lastSeenPosts).forEach(([handle, uri]) => {
         lastSeenPosts.set(handle, uri);
+      });
+    }
+    if (saved.recentPostsCache) {
+      Object.entries(saved.recentPostsCache).forEach(([handle, posts]) => {
+        recentPostsCache.set(handle, new Set(posts));
       });
     }
     
@@ -132,6 +141,9 @@ async function saveSettings() {
       caseSensitive: config.filter.caseSensitive,
       adminRoleIds: config.discord.adminRoleIds,
       lastSeenPosts: Object.fromEntries(lastSeenPosts),
+      recentPostsCache: Object.fromEntries(
+        Array.from(recentPostsCache.entries()).map(([handle, set]) => [handle, Array.from(set)])
+      ),
       lastUpdated: new Date().toISOString()
     };
     
@@ -527,6 +539,33 @@ async function getLatestPost(handle) {
   }
 }
 
+// Function to add post to recent cache
+function addToRecentCache(handle, postUri) {
+  if (!recentPostsCache.has(handle)) {
+    recentPostsCache.set(handle, new Set());
+  }
+  
+  const cache = recentPostsCache.get(handle);
+  cache.add(postUri);
+  
+  // Keep only last CACHE_SIZE posts
+  if (cache.size > CACHE_SIZE) {
+    const postsArray = Array.from(cache);
+    const toRemove = postsArray.slice(0, postsArray.length - CACHE_SIZE);
+    toRemove.forEach(uri => cache.delete(uri));
+  }
+  
+  console.log(`   Cache for @${handle}: ${cache.size} posts tracked`);
+}
+
+// Function to check if post is in recent cache
+function isInRecentCache(handle, postUri) {
+  if (!recentPostsCache.has(handle)) {
+    return false;
+  }
+  return recentPostsCache.get(handle).has(postUri);
+}
+
 // Function to post to Discord
 async function postToDiscord(post) {
   try {
@@ -537,10 +576,18 @@ async function postToDiscord(post) {
     const record = postData.record;
     const postUri = postData.uri;
     
-    // Double-check we haven't posted this already (extra safety)
+    // Triple-check we haven't posted this already (extra safety)
     const handle = author.handle;
+    
+    // Check 1: Last seen post
     if (lastSeenPosts.get(handle) === postUri) {
-      console.log(`⚠️  Duplicate detected - skipping post from @${handle}`);
+      console.log(`⚠️  Duplicate detected (last seen) - skipping post from @${handle}`);
+      return;
+    }
+    
+    // Check 2: Recent posts cache
+    if (isInRecentCache(handle, postUri)) {
+      console.log(`⚠️  Duplicate detected (recent cache) - skipping post from @${handle}`);
       return;
     }
     
@@ -575,6 +622,9 @@ async function postToDiscord(post) {
 
     await channel.send({ embeds: [embed] });
     console.log(`✅ Posted to Discord from @${author.handle}: ${record.text.substring(0, 50)}...`);
+    
+    // Add to recent cache after successful post
+    addToRecentCache(handle, postUri);
   } catch (error) {
     console.error('❌ Error posting to Discord:', error);
     // Don't throw - we want to continue checking other accounts
@@ -654,6 +704,9 @@ discord.once('clientReady', async () => {
   config.bluesky.handles.forEach(handle => {
     if (!lastSeenPosts.has(handle)) {
       lastSeenPosts.set(handle, null);
+    }
+    if (!recentPostsCache.has(handle)) {
+      recentPostsCache.set(handle, new Set());
     }
   });
   
