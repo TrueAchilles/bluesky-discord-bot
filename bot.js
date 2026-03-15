@@ -632,7 +632,7 @@ async function checkAllAccounts() {
 }
 
 // Discord bot ready event
-discord.once('ready', async () => {
+discord.once('clientReady', async () => {
   console.log(`Discord bot logged in as ${discord.user.tag}`);
   
   // Load saved settings first
