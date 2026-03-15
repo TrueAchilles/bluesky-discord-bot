@@ -535,6 +535,14 @@ async function postToDiscord(post) {
     const postData = post.post;
     const author = postData.author;
     const record = postData.record;
+    const postUri = postData.uri;
+    
+    // Double-check we haven't posted this already (extra safety)
+    const handle = author.handle;
+    if (lastSeenPosts.get(handle) === postUri) {
+      console.log(`⚠️  Duplicate detected - skipping post from @${handle}`);
+      return;
+    }
     
     // Create embed
     const embed = new EmbedBuilder()
@@ -566,9 +574,10 @@ async function postToDiscord(post) {
     }
 
     await channel.send({ embeds: [embed] });
-    console.log(`Posted to Discord from @${author.handle}: ${record.text.substring(0, 50)}...`);
+    console.log(`✅ Posted to Discord from @${author.handle}: ${record.text.substring(0, 50)}...`);
   } catch (error) {
-    console.error('Error posting to Discord:', error);
+    console.error('❌ Error posting to Discord:', error);
+    // Don't throw - we want to continue checking other accounts
   }
 }
 
@@ -587,11 +596,12 @@ async function checkAccountForNewPosts(handle) {
   // If this is the first check for this account
   if (lastSeen === null || lastSeen === undefined) {
     lastSeenPosts.set(handle, postUri);
+    await saveSettings();
     console.log(`Tracking @${handle} - initial post recorded`);
     return;
   }
   
-  // If we have a new post
+  // If we have a new post (URI is different from last seen)
   if (postUri !== lastSeen) {
     console.log(`New post detected from @${handle}`);
     
@@ -599,11 +609,16 @@ async function checkAccountForNewPosts(handle) {
     if (matchesFilter(postText)) {
       console.log(`Post from @${handle} matches filter, posting to Discord...`);
       await postToDiscord(latestPost);
+      
+      // Update last seen post AFTER successfully posting to Discord
+      lastSeenPosts.set(handle, postUri);
+      await saveSettings();
     } else {
       console.log(`Post from @${handle} filtered out based on keywords.`);
+      // Still update last seen even if filtered, to prevent re-checking
+      lastSeenPosts.set(handle, postUri);
+      await saveSettings();
     }
-    
-    lastSeenPosts.set(handle, postUri);
   }
 }
 
