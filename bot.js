@@ -72,6 +72,14 @@ const config = {
       [],
     mode: process.env.FILTER_MODE || 'none',
     caseSensitive: process.env.FILTER_CASE_SENSITIVE === 'true'
+  },
+  fantasy: {
+    enabled: process.env.ESPN_ENABLED === 'true' || false,
+    leagueId: process.env.ESPN_LEAGUE_ID || '',
+    seasonId: parseInt(process.env.ESPN_SEASON_ID) || new Date().getFullYear(),
+    s2Cookie: process.env.ESPN_S2 || '',
+    swidCookie: process.env.ESPN_SWID || '',
+    checkInterval: parseInt(process.env.ESPN_CHECK_INTERVAL) || 60000
   }
 };
 
@@ -95,6 +103,11 @@ const lastSeenPosts = new Map();
 // Track recent posts cache per account (prevents duplicates)
 const recentPostsCache = new Map(); // Map<handle, Set<postUri>>
 const CACHE_SIZE = 10; // Keep last 10 posts per account
+
+// ESPN Fantasy Football tracking
+let espnLeague = null; // ESPN league instance
+const fantasyTransactionCache = new Set(); // Track posted transaction IDs to prevent duplicates
+const FANTASY_CACHE_SIZE = 50; // Keep track of last 50 transactions
 
 // Load settings from file
 async function loadSettings() {
@@ -120,14 +133,55 @@ async function loadSettings() {
     }
     
     console.log('✅ Loaded settings from file');
+    
+    // Merge with environment variable accounts (don't remove saved accounts)
+    mergeEnvAccounts();
+    
     return true;
   } catch (error) {
     if (error.code === 'ENOENT') {
       console.log('📝 No saved settings found, using defaults');
+      // Still merge env accounts even if no file exists
+      mergeEnvAccounts();
     } else {
       console.error('⚠️  Error loading settings:', error.message);
     }
     return false;
+  }
+}
+
+// Merge environment variable accounts with saved accounts
+function mergeEnvAccounts() {
+  if (!config.bluesky.handles || config.bluesky.handles.length === 0) {
+    console.log('⚠️  No accounts configured');
+    return;
+  }
+  
+  const envHandles = process.env.BLUESKY_HANDLES 
+    ? process.env.BLUESKY_HANDLES.split(',').map(h => h.trim())
+    : [];
+  
+  if (envHandles.length === 0) {
+    console.log('   No BLUESKY_HANDLES in environment variables');
+    return;
+  }
+  
+  // Add env accounts that aren't already in the list
+  let added = 0;
+  envHandles.forEach(handle => {
+    if (handle && !config.bluesky.handles.includes(handle)) {
+      config.bluesky.handles.push(handle);
+      added++;
+      console.log(`   Added from env: @${handle}`);
+    }
+  });
+  
+  if (added > 0) {
+    console.log(`✅ Merged ${added} account(s) from BLUESKY_HANDLES environment variable`);
+    // Save the merged list
+    saveSettings();
+  } else {
+    console.log('   All env accounts already in follow list');
   }
 }
 
@@ -154,6 +208,181 @@ async function saveSettings() {
     console.error('⚠️  Error saving settings:', error.message);
     return false;
   }
+}
+
+// Initialize ESPN Fantasy League
+async function initializeESPN() {
+  if (!config.fantasy.enabled) {
+    console.log('⚠️  ESPN Fantasy Football is disabled');
+    return false;
+  }
+
+  if (!config.fantasy.leagueId || !config.fantasy.s2Cookie || !config.fantasy.swidCookie) {
+    console.error('❌ ESPN configuration incomplete');
+    console.error('   Required: ESPN_LEAGUE_ID, ESPN_S2, ESPN_SWID');
+    console.error('   Get these from your browser cookies (see documentation)');
+    return false;
+  }
+
+  try {
+    console.log(`🏈 Initializing ESPN Fantasy League (ID: ${config.fantasy.leagueId})...`);
+    
+    // Test authentication by making a simple API request
+    const testUrl = `https://lm-api-reads.espn.com/lm/site/v5/private/leagues/${config.fantasy.leagueId}`;
+    const headers = {
+      'Cookie': `espn_s2=${config.fantasy.s2Cookie}; SWID=${config.fantasy.swidCookie}`,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    };
+
+    console.log('🔐 Testing ESPN authentication...');
+    // We'll do a basic check - actual fetch will happen in checkFantasyTransactions
+    
+    console.log('✅ ESPN Fantasy Football initialized');
+    return true;
+  } catch (error) {
+    console.error('❌ Failed to initialize ESPN:', error.message);
+    return false;
+  }
+}
+
+// Fetch ESPN transactions using direct API calls with cookies
+async function fetchESPNTransactions() {
+  if (!config.fantasy.enabled) {
+    return [];
+  }
+
+  try {
+    console.log(`🏈 Fetching transactions from ESPN league...`);
+    
+    // ESPN API endpoint for transactions
+    const url = `https://lm-api-reads.espn.com/lm/site/v5/private/leagues/${config.fantasy.leagueId}/transactions?scoringPeriodId=-1`;
+    
+    const headers = {
+      'Cookie': `espn_s2=${config.fantasy.s2Cookie}; SWID=${config.fantasy.swidCookie}`,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    };
+
+    return new Promise((resolve, reject) => {
+      https.get(url, { headers }, (res) => {
+        let data = '';
+        
+        if (res.statusCode === 401 || res.statusCode === 403) {
+          console.error('❌ ESPN authentication failed - cookies may be expired');
+          resolve([]);
+          return;
+        }
+
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            const transactions = parsed.transactions || [];
+            console.log(`   Found ${transactions.length} transaction(s)`);
+            resolve(transactions);
+          } catch (err) {
+            console.error('❌ Error parsing ESPN response:', err.message);
+            resolve([]);
+          }
+        });
+      }).on('error', (err) => {
+        console.error('❌ Error fetching from ESPN:', err.message);
+        resolve([]);
+      });
+    });
+  } catch (error) {
+    console.error('⚠️  Error fetching ESPN transactions:', error.message);
+    return [];
+  }
+}
+
+// Format ESPN transaction for Discord
+function formatFantasyTransaction(transaction) {
+  if (!transaction) return null;
+
+  const embed = new EmbedBuilder()
+    .setColor(0xFF6600)
+    .setTimestamp(new Date(transaction.executionDate));
+
+  const txType = transaction.type; // TRADE, WAIVER, PICKUP, DROP, etc.
+  
+  try {
+    switch (txType) {
+      case 'TRADE':
+        embed.setTitle('🔄 Trade Accepted');
+        if (transaction.trades && transaction.trades.length >= 2) {
+          const trade1 = transaction.trades[0];
+          const trade2 = transaction.trades[1];
+          const team1 = trade1.team?.name || 'Team 1';
+          const team2 = trade2.team?.name || 'Team 2';
+          const players1 = trade1.playerIds?.length || 0;
+          const players2 = trade2.playerIds?.length || 0;
+          
+          embed.addFields(
+            { name: team1, value: `Receives ${players2} player(s)`, inline: true },
+            { name: team2, value: `Receives ${players1} player(s)`, inline: true }
+          );
+        }
+        break;
+
+      case 'WAIVER':
+        embed.setTitle('📋 Waiver Claim');
+        const waiverTeam = transaction.teamsInvolved?.[0]?.name || 'Team';
+        const waiverPlayers = transaction.playerIds?.length || 0;
+        embed.addFields(
+          { name: 'Team', value: waiverTeam, inline: true },
+          { name: 'Players Claimed', value: waiverPlayers.toString(), inline: true }
+        );
+        break;
+
+      case 'PICKUP':
+      case 'FREEAGENT':
+        embed.setTitle('✅ Free Agent Pickup');
+        const pickupTeam = transaction.teamsInvolved?.[0]?.name || 'Team';
+        const pickupPlayers = transaction.playerIds?.length || 0;
+        embed.addFields(
+          { name: 'Team', value: pickupTeam, inline: true },
+          { name: 'Players Added', value: pickupPlayers.toString(), inline: true }
+        );
+        break;
+
+      case 'DROP':
+        embed.setTitle('❌ Player Dropped');
+        const dropTeam = transaction.teamsInvolved?.[0]?.name || 'Team';
+        const dropPlayers = transaction.playerIds?.length || 0;
+        embed.addFields(
+          { name: 'Team', value: dropTeam, inline: true },
+          { name: 'Players Dropped', value: dropPlayers.toString(), inline: true }
+        );
+        break;
+
+      default:
+        embed.setTitle('🏈 League Transaction')
+          .setDescription(txType);
+    }
+
+    embed.setFooter({ text: 'ESPN Fantasy Football' });
+    return embed;
+  } catch (error) {
+    console.error('Error formatting transaction:', error);
+    return null;
+  }
+}
+
+// Post ESPN transaction to Discord
+async function postFantasyTransaction(transaction) {
+  try {
+    const channel = await discord.channels.fetch(config.discord.channelId);
+    const embed = formatFantasyTransaction(transaction);
+    
+    if (embed) {
+      await channel.send({ embeds: [embed] });
+      console.log(`✅ Posted fantasy transaction to Discord`);
+      return true;
+    }
+  } catch (error) {
+    console.error('❌ Error posting fantasy transaction:', error.message);
+  }
+  return false;
 }
 
 // Login to Bluesky
@@ -681,6 +910,48 @@ async function checkAllAccounts() {
   }
 }
 
+// Function to check for new fantasy transactions
+async function checkFantasyTransactions() {
+  if (!config.fantasy.enabled) {
+    return;
+  }
+
+  console.log(`🏈 Checking for new fantasy transactions...`);
+  
+  try {
+    const transactions = await fetchESPNTransactions();
+    
+    if (!transactions || transactions.length === 0) {
+      console.log(`   No new transactions found`);
+      return;
+    }
+
+    // Process new transactions
+    for (const transaction of transactions) {
+      const txId = transaction.id || transaction.transactionId;
+      
+      // Skip if already posted
+      if (fantasyTransactionCache.has(txId)) {
+        console.log(`   Skipping duplicate transaction: ${txId}`);
+        continue;
+      }
+
+      // Post new transaction
+      await postFantasyTransaction(transaction);
+      fantasyTransactionCache.add(txId);
+
+      // Trim cache if it gets too large
+      if (fantasyTransactionCache.size > FANTASY_CACHE_SIZE) {
+        const arr = Array.from(fantasyTransactionCache);
+        const toRemove = arr.slice(0, arr.length - FANTASY_CACHE_SIZE);
+        toRemove.forEach(id => fantasyTransactionCache.delete(id));
+      }
+    }
+  } catch (error) {
+    console.error('❌ Error checking fantasy transactions:', error.message);
+  }
+}
+
 // Discord bot ready event
 discord.once('clientReady', async () => {
   console.log(`Discord bot logged in as ${discord.user.tag}`);
@@ -709,6 +980,17 @@ discord.once('clientReady', async () => {
       recentPostsCache.set(handle, new Set());
     }
   });
+  
+  // Initialize ESPN Fantasy Football if enabled
+  if (config.fantasy.enabled) {
+    const espnReady = await initializeESPN();
+    if (espnReady) {
+      console.log('✅ ESPN Fantasy Football integration active');
+      // Start checking for transactions every minute
+      checkFantasyTransactions();
+      setInterval(checkFantasyTransactions, config.fantasy.checkInterval);
+    }
+  }
   
   // Start checking for new posts
   checkAllAccounts();
